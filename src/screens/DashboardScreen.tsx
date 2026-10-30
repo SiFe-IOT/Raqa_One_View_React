@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { BackHandler, FlatList, Image, Pressable, findNodeHandle, ScrollView, StyleSheet, Text, View, LayoutChangeEvent } from 'react-native';
+import { BackHandler, FlatList, Image, Pressable, findNodeHandle, ScrollView, StyleSheet, Text, View, LayoutChangeEvent, StyleProp, ViewStyle } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useIsFocused, useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -31,6 +31,56 @@ const RIGHT_PANEL_WIDTH = 205; // width of the right side panel (change this to 
 const two = (n: number) => String(n).padStart(2, '0');
 const overlay = (o: number) => (AppSettings.darkModeEnabled ? `rgba(255,255,255,${o})` : `rgba(0,0,0,${o})`);
 
+/** Local TV-friendly pressable, avoiding a dependency on a missing component module. */
+function FocusPressable({
+  children,
+  style,
+  onPress,
+  onFocus,
+  onBlur,
+  focusable = true,
+  hasTVPreferredFocus,
+  radius = 8,
+  scale = 1,
+  accent = AppTheme.focusAccent,
+  focusFill,
+}: {
+  children: React.ReactNode | ((focused: boolean) => React.ReactNode);
+  style?: StyleProp<ViewStyle>;
+  onPress?: () => void;
+  onFocus?: () => void;
+  onBlur?: () => void;
+  focusable?: boolean;
+  hasTVPreferredFocus?: boolean;
+  radius?: number;
+  scale?: number;
+  accent?: string;
+  focusFill?: string;
+}) {
+  const [focused, setFocused] = useState(false);
+  return (
+    <Pressable
+      focusable={focusable}
+      hasTVPreferredFocus={hasTVPreferredFocus}
+      onPress={onPress}
+      onFocus={() => { setFocused(true); onFocus?.(); }}
+      onBlur={() => { setFocused(false); onBlur?.(); }}
+      style={[
+        style,
+        focused && {
+          borderRadius: radius,
+          borderColor: accent,
+          borderWidth: 2,
+          backgroundColor: focusFill,
+          transform: [{ scale }],
+        },
+      ]}
+    >
+      {typeof children === 'function' ? children(focused) : children}
+    </Pressable>
+  );
+}
+
 Sound.setCategory('Playback');
 
 export function DashboardScreen() {
@@ -45,8 +95,6 @@ export function DashboardScreen() {
 
   const [selectedFloorIndex, setSelectedFloorIndex] = useState(0);
   const [selectedAlertFloorIndex, setSelectedAlertFloorIndex] = useState(0);
-  const [focusedFloor, setFocusedFloor] = useState<number | null>(null);
-  const [focusedDevice, setFocusedDevice] = useState<string | null>(null);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [now, setNow] = useState(Date.now());
   const [muted, setMuted] = useState(false);
@@ -127,6 +175,7 @@ export function DashboardScreen() {
   const floorDevicesOnline = (f: SiteImageConfig) => floorDeviceIds(f).filter((id) => !manager.isSlaveOffline(id)).length;
   const floorSensorsOnline = (f: SiteImageConfig) => f.sensors.filter((s) => !manager.isSlaveOffline(s.slaveId)).length;
 
+  const selectSensor = useCallback((s: PlacedSensor) => setSelectedKey(pinKey(s)), []);
   const toggleSelect = useCallback((s: PlacedSensor) => setSelectedKey((k) => (k === pinKey(s) ? null : pinKey(s))), []);
 
   // ---------- fire-alert data ----------
@@ -168,7 +217,7 @@ export function DashboardScreen() {
   // the pins; it keeps FloorBody (and the big SVG) from repainting every second.
   const statusTick = Math.floor(now / 5000);
   const dataVersion = manager.changes.getVersion();
-  const floorProps = { manager, selectedKey, focusedDevice, setFocusedDevice, toggleSelect, statusTick, dataVersion, dark: AppSettings.darkModeEnabled, pinSize: AppSettings.pinSize };
+  const floorProps = { manager, selectedKey, selectSensor, toggleSelect, statusTick, dataVersion, dark: AppSettings.darkModeEnabled, pinSize: AppSettings.pinSize };
 
   // ---------- top bar ----------
   const renderTopBar = (alertMode = false) => {
@@ -201,11 +250,11 @@ export function DashboardScreen() {
           </Text>
         </View>
         {AppSettings.sirenEnabled && (
-          <IconBtn onPress={() => setMuted((m) => !m)}>
+          <IconBtn accent={accent} onPress={() => setMuted((m) => !m)}>
             <Icon name={muted ? 'volume-off' : 'volume-up'} color={fg} />
           </IconBtn>
         )}
-        <IconBtn onPress={() => navigation.navigate('Home')}>
+        <IconBtn accent={accent} onPress={() => navigation.navigate('Home')}>
           <Icon name="menu" color={fg} />
         </IconBtn>
       </View>
@@ -222,32 +271,32 @@ export function DashboardScreen() {
       <ScrollView>
         {history.map((f, i) => {
           const sel = i === floorIndex;
-          const foc = focusedFloor === i;
           return (
-            <Pressable
+            <FocusPressable
               key={f.id}
-              hasTVPreferredFocus={i === 0}
+              hasTVPreferredFocus={i === floorIndex}
+              radius={8}
+              scale={1.03}
               onPress={() => { setSelectedFloorIndex(i); setSelectedKey(null); }}
-              onFocus={() => { setFocusedFloor(i); setSelectedFloorIndex(i); setSelectedKey(null); }}
-              onBlur={() => setFocusedFloor((x) => (x === i ? null : x))}
-              style={[
-                styles.floorTab,
-                {
-                  backgroundColor: sel ? overlay(0.08) : foc ? AppTheme.focusFill : 'transparent',
-                  borderLeftColor: foc || sel ? AppTheme.focusAccent : 'transparent',
-                },
-              ]}
+              onFocus={() => { setSelectedFloorIndex(i); setSelectedKey(null); }}
+              style={[styles.floorTab, { backgroundColor: sel ? overlay(0.08) : 'transparent' }]}
             >
-              <Text
-                style={{
-                  color: foc ? AppTheme.focusAccent : sel ? AppTheme.textPrimary : AppTheme.textSecondary,
-                  fontWeight: sel || foc ? 'bold' : 'normal',
-                  fontSize: 15,
-                }}
-              >
-                {f.floorLabel}
-              </Text>
-            </Pressable>
+              {(foc: boolean) => (
+                <>
+                  <View style={[styles.selBar, { backgroundColor: sel || foc ? AppTheme.focusAccent : 'transparent' }]} />
+                  <Text
+                    numberOfLines={1}
+                    style={{
+                      color: foc ? AppTheme.focusAccent : sel ? AppTheme.textPrimary : AppTheme.textSecondary,
+                      fontWeight: sel || foc ? 'bold' : 'normal',
+                      fontSize: 15,
+                    }}
+                  >
+                    {f.floorLabel}
+                  </Text>
+                </>
+              )}
+            </FocusPressable>
           );
         })}
       </ScrollView>
@@ -267,35 +316,34 @@ export function DashboardScreen() {
           const color = colorForStatus(status);
           const key = pinKey(item);
           const sel = selectedKey === key;
-          const foc = focusedDevice === `dev_${key}`;
           return (
-            <Pressable
-              onPress={() => toggleSelect(item)}
-              onFocus={() => setFocusedDevice(`dev_${key}`)}
-              onBlur={() => setFocusedDevice((f) => (f === `dev_${key}` ? null : f))}
-              style={[
-                styles.deviceRow,
-                {
-                  backgroundColor: sel ? overlay(0.06) : foc ? AppTheme.focusFill : 'transparent',
-                  borderLeftColor: foc || sel ? AppTheme.focusAccent : 'transparent',
-                },
-              ]}
+            <FocusPressable
+              radius={8}
+              scale={1.03}
+              onPress={() => selectSensor(item)}
+              onFocus={() => selectSensor(item)}
+              style={[styles.deviceRow, { backgroundColor: sel ? overlay(0.06) : 'transparent' }]}
             >
-              <Icon name={status === 'offline' ? 'wifi-off' : SensorTypeUi[item.type].icon} size={18} color={color} />
-              <View style={{ flex: 1, marginLeft: 8 }}>
-                <Text
-                  numberOfLines={1}
-                  style={{
-                    color: foc ? AppTheme.focusAccent : AppTheme.textSecondary,
-                    fontSize: 14,
-                    fontWeight: foc ? 'bold' : 'normal',
-                  }}
-                >
-                  {item.name}
-                </Text>
-                <Text style={{ color, fontSize: 12, marginTop: 2, opacity: 0.9 }}>{status}</Text>
-              </View>
-            </Pressable>
+              {(foc: boolean) => (
+                <>
+                  <View style={[styles.selBar, { backgroundColor: sel || foc ? AppTheme.focusAccent : 'transparent' }]} />
+                  <Icon name={status === 'offline' ? 'wifi-off' : SensorTypeUi[item.type].icon} size={18} color={color} />
+                  <View style={{ flex: 1, marginLeft: 8 }}>
+                    <Text
+                      numberOfLines={1}
+                      style={{
+                        color: foc ? AppTheme.focusAccent : sel ? AppTheme.textPrimary : AppTheme.textSecondary,
+                        fontSize: 14,
+                        fontWeight: foc || sel ? 'bold' : 'normal',
+                      }}
+                    >
+                      {item.name}
+                    </Text>
+                    <Text style={{ color, fontSize: 12, marginTop: 2, opacity: 0.9 }}>{status}</Text>
+                  </View>
+                </>
+              )}
+            </FocusPressable>
           );
         }}
       />
@@ -396,18 +444,18 @@ export function DashboardScreen() {
               keyExtractor={(f) => f.id}
               renderItem={({ item, index }) => {
                 const sel = index === alertIdx;
-                const foc = focusedFloor === 1000 + index;
                 return (
-                  <Pressable
+                  <FocusPressable
                     focusable
+                    accent={C.redAccent}
+                    focusFill="rgba(244,67,54,0.25)"
+                    radius={8}
+                    scale={1.03}
                     onPress={() => { setSelectedAlertFloorIndex(index); setSelectedKey(null); }}
-                    onFocus={() => { setFocusedFloor(1000 + index); if (index !== alertIdx) { setSelectedAlertFloorIndex(index); setSelectedKey(null); } }}
-                    onBlur={() => setFocusedFloor((x) => (x === 1000 + index ? null : x))}
-                    style={[
-                      styles.fireItem,
-                      { backgroundColor: foc ? 'rgba(244,67,54,0.25)' : sel ? 'rgba(244,67,54,0.12)' : 'transparent', borderLeftColor: sel || foc ? C.redAccent : 'transparent' },
-                    ]}
+                    onFocus={() => { if (index !== alertIdx) { setSelectedAlertFloorIndex(index); setSelectedKey(null); } }}
+                    style={[styles.fireItem, { backgroundColor: sel ? 'rgba(244,67,54,0.12)' : 'transparent' }]}
                   >
+                    <View style={[styles.selBar, { backgroundColor: sel ? C.redAccent : 'transparent' }]} />
                     <Icon name="local-fire-department" size={18} color={C.redAccent} />
                     <Text
                       numberOfLines={1}
@@ -422,7 +470,7 @@ export function DashboardScreen() {
                         </Text>
                       </View>
                     )}
-                  </Pressable>
+                  </FocusPressable>
                 );
               }}
             />
@@ -489,15 +537,14 @@ const FloorBody = React.memo(function FloorBody(props: {
   onlyFiring?: boolean;
   manager: Rs485Service;
   selectedKey: string | null;
-  focusedDevice: string | null;
-  setFocusedDevice: React.Dispatch<React.SetStateAction<string | null>>;
+  selectSensor: (s: PlacedSensor) => void;
   toggleSelect: (s: PlacedSensor) => void;
   statusTick: number;   // only used to re-render pins as time passes
   dataVersion: number;  // only used to re-render pins when new data arrives
   dark: boolean;        // theme change must repaint the memoised view
   pinSize: number;
 }) {
-  const { floor, onlyFiring, manager, selectedKey, focusedDevice, setFocusedDevice, toggleSelect } = props;
+  const { floor, onlyFiring, manager, selectedKey, selectSensor, toggleSelect } = props;
   const { info, error, isCurrent } = useSvg(floor?.imagePath ?? null);
   const [box, setBox] = useState({ w: 0, h: 0 });
   if (!floor) return <EmptyState />;
@@ -528,7 +575,6 @@ const FloorBody = React.memo(function FloorBody(props: {
             const fire = status === 'fire';
             const key = pinKey(s);
             const selected = selectedKey === key;
-            const focused = focusedDevice === `pin_${key}`;
             return (
               <View
                 key={key}
@@ -541,17 +587,19 @@ const FloorBody = React.memo(function FloorBody(props: {
                 }}
               >
                 {fire && <FireRipple size={rippleBox} color={C.redAccent} />}
-                <Pressable
+                <FocusPressable
+                  accent={C.teal700}
+                  focusFill={color}
+                  radius={pinSize / 2 + 4}
+                  scale={1.3}
                   onPress={() => toggleSelect(s)}
-                  onFocus={() => setFocusedDevice(`pin_${key}`)}
-                  onBlur={() => setFocusedDevice((f) => (f === `pin_${key}` ? null : f))}
+                  onFocus={() => selectSensor(s)}
                   style={{
-                    width: pinSize, height: pinSize, borderRadius: pinSize / 2, backgroundColor: color,
+                    width: pinSize + 8, height: pinSize + 8, borderRadius: (pinSize + 8) / 2, backgroundColor: color,
                     alignItems: 'center', justifyContent: 'center',
-                    borderWidth: selected ? 3 : focused ? 2 : 0,
-                    borderColor: selected ? C.black : C.teal700,
+                    borderWidth: selected ? 3 : 2,
+                    borderColor: selected ? C.black : 'transparent',
                     ...(fire ? { shadowColor: C.red, shadowOpacity: 0.6, shadowRadius: 16, elevation: 10 } : null),
-                    ...(focused && !selected ? { shadowColor: C.teal700, shadowOpacity: 0.5, shadowRadius: 12, elevation: 6 } : null),
                   }}
                 >
                   <Icon
@@ -559,7 +607,7 @@ const FloorBody = React.memo(function FloorBody(props: {
                     size={pinSize * 0.5}
                     color={C.white}
                   />
-                </Pressable>
+                </FocusPressable>
               </View>
             );
           })}
@@ -569,18 +617,11 @@ const FloorBody = React.memo(function FloorBody(props: {
 });
 
 /** Top-bar button that shows a clear ring when reached with the D-pad. */
-function IconBtn({ onPress, children }: { onPress: () => void; children: React.ReactNode }) {
-  const [foc, setFoc] = useState(false);
+function IconBtn({ onPress, children, accent }: { onPress: () => void; children: React.ReactNode; accent?: string }) {
   return (
-    <Pressable
-      focusable
-      onPress={onPress}
-      onFocus={() => setFoc(true)}
-      onBlur={() => setFoc(false)}
-      style={[styles.iconBtn, { borderRadius: 8, borderWidth: 2, borderColor: foc ? AppTheme.focusAccent : 'transparent', backgroundColor: foc ? 'rgba(100,255,218,0.12)' : 'transparent' }]}
-    >
+    <FocusPressable focusable accent={accent} radius={10} scale={1.12} onPress={onPress} style={styles.iconBtn}>
       {children}
-    </Pressable>
+    </FocusPressable>
   );
 }
 
@@ -680,6 +721,16 @@ function AlertFooter(props: {
         {
           borderTopColor: border,
           borderTopWidth: foc ? 3 : 1,
+          ...(foc
+            ? {
+                backgroundColor: '#2E0808',
+                shadowColor: C.redAccent,
+                shadowOpacity: 0.6,
+                shadowRadius: 14,
+                shadowOffset: { width: 0, height: 0 },
+                elevation: 10,
+              }
+            : null),
         },
       ]}
     >
@@ -912,14 +963,15 @@ const styles = StyleSheet.create({
   floorCanvas: { flex: 1, borderRadius: 8, overflow: 'hidden' },
   floorTabs: { flex: 1, borderRightWidth: 1, borderBottomWidth: 1 },
   floorHeader: { height: 42, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12 },
-  floorTab: { height: 40, paddingHorizontal: 12, justifyContent: 'center', borderLeftWidth: 3 },
-  deviceRow: { paddingHorizontal: 8, paddingVertical: 5, flexDirection: 'row', alignItems: 'center', borderLeftWidth: 3 },
+  floorTab: { height: 40, paddingHorizontal: 10, marginHorizontal: 6, marginVertical: 1, flexDirection: 'row', alignItems: 'center' },
+  selBar: { width: 3, height: 18, borderRadius: 2, marginRight: 8 },
+  deviceRow: { paddingHorizontal: 8, paddingVertical: 5, marginHorizontal: 6, marginVertical: 1, flexDirection: 'row', alignItems: 'center' },
   left: { width: PANEL_WIDTH },
   right: { width: RIGHT_PANEL_WIDTH, flexGrow: 0, flexShrink: 0 },
   hr: { height: 1 },
   bottom: { height: 48, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', borderTopWidth: 1 },
   fireList: { width: 190, backgroundColor: FIRE_BG },
-  fireItem: { height: 44, paddingHorizontal: 12, flexDirection: 'row', alignItems: 'center', borderLeftWidth: 3 },
+  fireItem: { height: 44, paddingHorizontal: 10, marginHorizontal: 6, marginVertical: 1, flexDirection: 'row', alignItems: 'center' },
   alertHeader: { height: 44, paddingHorizontal: 16, justifyContent: 'center', borderBottomWidth: 1, borderBottomColor: C.redAccent },
   alertFooter: { paddingHorizontal: 8, paddingVertical: 8, backgroundColor: FIRE_BG },
   chipRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 },
