@@ -5,12 +5,14 @@ buildscript {
         compileSdkVersion = 37
         targetSdkVersion = 36
         ndkVersion = "27.1.12297006"
-        kotlinVersion = "2.2.0"
+        kotlinVersion = "2.2.10"
     }
+
     repositories {
         google()
         mavenCentral()
     }
+
     dependencies {
         classpath("com.android.tools.build:gradle")
         classpath("com.facebook.react:react-native-gradle-plugin")
@@ -19,3 +21,17 @@ buildscript {
 }
 
 apply plugin: "com.facebook.react.rootproject"
+subprojects { subproject ->
+    subproject.plugins.withId("com.android.library") {
+        subproject.extensions.getByName("androidComponents").finalizeDsl { ext ->
+            ext.buildFeatures.buildConfig = true
+
+            // Bump libraries that hardcode an old compileSdk
+            def minCompileSdk = rootProject.ext.compileSdkVersion as int
+            def current = ext.compileSdk ?: 0
+            if (current > 0 && current < 34) {
+                ext.compileSdk = minCompileSdk
+            }
+        }
+    }
+}
