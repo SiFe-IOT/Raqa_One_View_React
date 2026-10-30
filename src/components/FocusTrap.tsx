@@ -3,7 +3,7 @@
 // screen drives its own highlight from useRemoteKeys. Without an owner,
 // Android TV hands focus (and the Select key) to controls hidden underneath.
 import React, { useEffect, useRef, useState } from 'react';
-import { findNodeHandle, Pressable, StyleProp, View, ViewStyle } from 'react-native';
+import { findNodeHandle, Pressable, StyleProp, ViewStyle } from 'react-native';
 
 export function FocusTrap({
   active = true,
@@ -17,11 +17,11 @@ export function FocusTrap({
   style?: StyleProp<ViewStyle>;
   children: React.ReactNode;
 }) {
-  const ref = useRef<View>(null);
+  const ref = useRef<React.ComponentRef<typeof Pressable>>(null);
   const [self, setSelf] = useState<number | undefined>(undefined);
 
   useEffect(() => {
-    const h = findNodeHandle(ref.current);
+    const h = findNodeHandle(ref.current as any);
     if (h) setSelf(h);
   }, []);
 

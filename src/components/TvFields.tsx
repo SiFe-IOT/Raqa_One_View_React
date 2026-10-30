@@ -33,19 +33,41 @@ export function TvTextField(props: {
   const change = (t: string) => onChangeText(digitsOnly ? t.replace(/[^0-9]/g, '') : t);
   const [focused, setFocused] = useState(false);
   const [editing, setEditing] = useState(false);
-  const inputRef = useRef<TextInput>(null);
-  const boxRef = useRef<View>(null);
+  const inputRef = useRef<React.ComponentRef<typeof TextInput>>(null);
+  const boxRef = useRef<React.ComponentRef<typeof Pressable>>(null);
   const empty = value.trim().length === 0;
   const hot = (external ? !!highlighted : focused) || editing;
 
+  // Pending focus-reclaim timers, so they can be cancelled.
+  const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const clearTimers = () => {
+    timers.current.forEach(clearTimeout);
+    timers.current = [];
+  };
+  useEffect(() => clearTimers, []); // cancel on unmount
+
   useEffect(() => { onEditingChange?.(editing); }, [editing]); // eslint-disable-line react-hooks/exhaustive-deps
-  const begin = () => { if (!editing) { setEditing(true); setTimeout(() => inputRef.current?.focus(), 0); } };
+
+  const begin = () => {
+    if (!editing) {
+      clearTimers(); // editing restarted: drop any pending reclaim
+      setEditing(true);
+      setTimeout(() => inputRef.current?.focus(), 0);
+    }
+  };
   useEffect(() => { if (startEdit) begin(); }, [startEdit]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // The Pressable keeps native focus only while the TextInput is closed. When
+  // The Pressable keeps native focus only while the TextInput is open. When
   // typing ends the TextInput unmounts and focus would be lost, so the D-pad
-  // could no longer reach Cancel / Save. Take focus back explicitly.
-  const reclaim = () => { if (!external) setTimeout(() => (boxRef.current as any)?.requestTVFocus?.(), 60); };
+  // could no longer reach Cancel / Save. Android re-assigns focus a moment
+  // after the keyboard closes and overrides a single request, so retry a few
+  // times (same approach as FocusTrap).
+  const reclaim = () => {
+    if (external) return;
+    clearTimers();
+    timers.current = [60, 250, 600].map((ms) =>
+      setTimeout(() => (boxRef.current as any)?.requestTVFocus?.(), ms));
+  };
   const finish = () => { setEditing(false); reclaim(); onSubmit?.(); };
 
   useEffect(() => {
@@ -127,7 +149,7 @@ export function TvSelectField<T>(props: {
   const { label, options, value, labelBuilder, onChange, autoFocus, external, highlighted } = props;
   const [focusedNative, setFocused] = useState(false);
   const focused = external ? !!highlighted : focusedNative;
-  const selRef = useRef<View>(null);
+  const selRef = useRef<React.ComponentRef<typeof Pressable>>(null);
   const disabled = options.length === 0;
 
   useEffect(() => {

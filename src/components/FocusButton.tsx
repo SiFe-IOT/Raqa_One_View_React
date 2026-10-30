@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleProp, StyleSheet, Text, View, ViewStyle } from 'react-native';
+import { Pressable, StyleProp, StyleSheet, Text, ViewStyle } from 'react-native';
 import { useAppSettings } from '../services/appSettings';
 import { AppTheme } from '../theme/appTheme';
 import { C } from '../theme/palette';
@@ -23,7 +23,7 @@ export function FocusButton({
   const [focNative, setFoc] = useState(false);
   const external = highlighted !== undefined;
   const foc = external ? !!highlighted : focNative;
-  const ref = useRef<View>(null);
+  const ref = useRef<React.ComponentRef<typeof Pressable>>(null);
   useEffect(() => {
     if (!autoFocus || disabled || external) return;
     const t = setTimeout(() => (ref.current as any)?.requestTVFocus?.(), 80);
