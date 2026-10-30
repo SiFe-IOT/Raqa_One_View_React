@@ -19,10 +19,6 @@ interface Props {
   onFocus: () => void;
 }
 
-/**
- * TV-friendly focusable card.
- * White by default and teal when focused/selected.
- */
 export function TvCard({
   icon,
   label,
@@ -33,7 +29,7 @@ export function TvCard({
   const [focused, setFocused] = useState(false);
   const screenFocused = useIsFocused();
 
-  const hasFocus = screenFocused && (focused || selected);
+  const hasFocus = screenFocused && focused;
 
   const scale = useRef(new Animated.Value(1)).current;
 
@@ -43,15 +39,27 @@ export function TvCard({
       duration: 150,
       useNativeDriver: true,
     }).start();
+
+    return () => {
+      scale.stopAnimation();
+    };
   }, [hasFocus, scale]);
+
+  // Clear local focus when this screen is no longer active.
+  useEffect(() => {
+    if (!screenFocused) {
+      setFocused(false);
+    }
+  }, [screenFocused]);
 
   return (
     <Pressable
       focusable={screenFocused}
-      hasTVPreferredFocus={selected && screenFocused}
       accessibilityRole="button"
       accessibilityLabel={label}
-      accessibilityState={{ selected: hasFocus }}
+      accessibilityState={{
+        selected,
+      }}
       onPress={onPress}
       onFocus={() => {
         setFocused(true);
@@ -104,13 +112,10 @@ const styles = StyleSheet.create({
   card: {
     width: '100%',
     height: '100%',
-
     borderRadius: 18,
     borderWidth: 2,
-
     alignItems: 'center',
     justifyContent: 'center',
-
     paddingHorizontal: 16,
     paddingVertical: 18,
   },
@@ -118,7 +123,6 @@ const styles = StyleSheet.create({
   cardNormal: {
     backgroundColor: C.white,
     borderColor: '#E5E7EB',
-
     shadowColor: '#000000',
     shadowOpacity: 0.08,
     shadowRadius: 8,
@@ -126,14 +130,12 @@ const styles = StyleSheet.create({
       width: 0,
       height: 3,
     },
-
     elevation: 4,
   },
 
   cardFocused: {
     backgroundColor: C.teal700,
     borderColor: C.tealAccent,
-
     shadowColor: C.tealAccent,
     shadowOpacity: 0.35,
     shadowRadius: 18,
@@ -141,7 +143,6 @@ const styles = StyleSheet.create({
       width: 0,
       height: 0,
     },
-
     elevation: 10,
   },
 
