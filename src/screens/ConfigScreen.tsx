@@ -28,7 +28,7 @@ import { C, withOpacity } from '../theme/palette';
 import { useRemoteKeys } from '../hooks/useRemoteKeys';
 
 const SENSOR_TYPES: SensorType[] = ['fire', 'temperature'];
-const CROSSHAIR_STEP = 0.04;
+const CROSSHAIR_STEP = 0.005; // fraction of canvas per D-pad press
 const clamp01 = (n: number) => Math.min(1, Math.max(0, n));
 
 type Region = 'back' | 'menu' | 'rail' | 'pin' | 'empty' | 'crosshair' | 'error';
@@ -472,9 +472,9 @@ function RailIcon(props: {
   return (
     <View style={styles.railItem}>
       <View {...pan.panHandlers} style={[styles.railIcon, { borderColor: ring }]}>
-        <Icon name={SensorTypeUi[props.type].icon} size={22} color="rgba(0,0,0,0.54)" />
+        <Icon name={SensorTypeUi[props.type].icon} size={18} color="rgba(0,0,0,0.54)" />
       </View>
-      <Text style={{ color: AppTheme.textSecondary, fontSize: 13, marginTop: 4 }}>{SensorTypeUi[props.type].label}</Text>
+      <Text style={{ color: AppTheme.textSecondary, fontSize: 10, marginTop: 4 }}>{SensorTypeUi[props.type].label}</Text>
     </View>
   );
 }
@@ -543,7 +543,6 @@ function EmptyState({ focused, onLoad }: { focused: boolean; onLoad: () => void 
     <View style={styles.center}>
       <Icon name="image" size={64} color={C.grey} />
       <Text style={{ color: C.grey, fontSize: 16, marginTop: 12 }}>No floor plan loaded</Text>
-      <Text style={{ color: C.grey, fontSize: 12, marginTop: 4 }}>SVG files only</Text>
       <Pressable
         focusable={false}
         onPress={onLoad}
@@ -571,10 +570,10 @@ const styles = StyleSheet.create({
   appBar: { height: 56, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 16 },
   appTitle: { flex: 1, fontSize: 20, fontWeight: '500', marginLeft: 16 },
   menuBtn: { padding: 6, borderRadius: 24, marginHorizontal: 4, borderWidth: 2, borderColor: 'transparent' },
-  rail: { width: 96, paddingVertical: 24, alignItems: 'center' },
-  railIcon: { width: 50, height: 50, borderRadius: 25, backgroundColor: C.white, borderWidth: 3, alignItems: 'center', justifyContent: 'center' },
+  rail: { width: 66, paddingVertical: 24, alignItems: 'center' },
+  railIcon: { width: 40, height: 40, borderRadius: 25, backgroundColor: C.white, borderWidth: 3, alignItems: 'center', justifyContent: 'center' },
   railItem: { alignItems: 'center', marginBottom: 20 },
-  hint: { width: 220, padding: 24, alignItems: 'center', justifyContent: 'center' },
+  hint: { width: 190, padding: 24, alignItems: 'center', justifyContent: 'center' },
   center: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   loadBtn: { flexDirection: 'row', alignItems: 'center', backgroundColor: C.teal, paddingHorizontal: 18, paddingVertical: 10, borderRadius: 20, marginTop: 16, borderWidth: 2, borderColor: 'transparent' },
   canvas: { flex: 1, backgroundColor: C.white, borderRadius: 8, overflow: 'hidden' },

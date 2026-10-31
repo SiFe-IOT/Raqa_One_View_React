@@ -66,8 +66,22 @@ export function bestPrioritySensorForFloor(
   return best;
 }
 
-/** Floors with an active fire, highest-priority first; stable by original index. */
-export function fireFloors(manager: Rs485Service, history: SiteImageConfig[], latched?: ReadonlySet<string>): SiteImageConfig[] {
+/** Start time of a firing sensor; a sensor whose time is not recorded yet is the newest. */
+const startOf = (startTimes: Map<string, number>, s: PlacedSensor) => startTimes.get(pinKey(s)) ?? Number.MAX_SAFE_INTEGER;
+
+/**
+ * Floors with an active fire.
+ *  - Priority OFF: the floor whose alert came most recently is first (latest first).
+ *  - Priority ON : highest-priority floor first, floors with no priority last;
+ *                  ties are broken by the most recent alert.
+ */
+export function fireFloors(
+  manager: Rs485Service,
+  history: SiteImageConfig[],
+  latched?: ReadonlySet<string>,
+  startTimes: Map<string, number> = new Map(),
+  usePriority = true,
+): SiteImageConfig[] {
   const floors = history
     .map((f, i) => ({ f, i }))
     .filter(({ f }) => f.sensors.some((s) => statusFor(manager, s, latched) === 'fire'));
@@ -76,28 +90,42 @@ export function fireFloors(manager: Rs485Service, history: SiteImageConfig[], la
     const b = bestPrioritySensorForFloor(manager, f, latched);
     return b ? priorityRank(b) : 1 << 30;
   };
+  const latestOf = (f: SiteImageConfig) => {
+    let m = -1;
+    for (const s of f.sensors) if (statusFor(manager, s, latched) === 'fire') m = Math.max(m, startOf(startTimes, s));
+    return m;
+  };
 
-  floors.sort((a, b) => rankOf(a.f) - rankOf(b.f) || a.i - b.i);
+  floors.sort((a, b) => {
+    if (usePriority) {
+      const r = rankOf(a.f) - rankOf(b.f);
+      if (r !== 0) return r;
+    }
+    const l = latestOf(b.f) - latestOf(a.f);   // newest alert first
+    return l || a.i - b.i;
+  });
   return floors.map((x) => x.f);
 }
 
-/** Firing sensors on a floor: priority first, then earliest start time. */
+/**
+ * Firing sensors on a floor.
+ *  - Priority OFF: latest alert first.
+ *  - Priority ON : priority first (no priority last), then latest alert first.
+ */
 export function firingSensorsForFloor(
   manager: Rs485Service,
   floor: SiteImageConfig,
   startTimes: Map<string, number>,
   latched?: ReadonlySet<string>,
+  usePriority = true,
 ): PlacedSensor[] {
   const firing = floor.sensors.filter((s) => statusFor(manager, s, latched) === 'fire');
   firing.sort((a, b) => {
-    const r = priorityRank(a) - priorityRank(b);
-    if (r !== 0) return r;
-    const sa = startTimes.get(pinKey(a));
-    const sb = startTimes.get(pinKey(b));
-    if (sa === undefined && sb === undefined) return 0;
-    if (sa === undefined) return 1;
-    if (sb === undefined) return -1;
-    return sa - sb;
+    if (usePriority) {
+      const r = priorityRank(a) - priorityRank(b);
+      if (r !== 0) return r;
+    }
+    return startOf(startTimes, b) - startOf(startTimes, a);
   });
   return firing;
 }

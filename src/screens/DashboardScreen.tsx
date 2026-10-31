@@ -226,7 +226,12 @@ export function DashboardScreen() {
     for (const k of [...fireStartTimes.keys()]) if (!live.has(k)) fireStartTimes.delete(k);
     // A NEW fire (a sensor that was not already in alert) always un-mutes the siren,
     // even if the operator muted an earlier alarm that is still active.
-    if (newFire) setMuted(false);
+    if (newFire) {
+      setMuted(false);
+      // Show the newest alert: jump to the first floor / sensor of the (re)sorted list.
+      setSelectedAlertFloorIndex(0);
+      setSelectedKey(null);
+    }
   }, [now, manager, store, fireStartTimes, fireLatch]);
 
   // ---------- buzzer ----------
@@ -234,7 +239,7 @@ export function DashboardScreen() {
   const buzzing = useRef(false);
 
   useEffect(() => {
-    const s = new Sound('fire_alarm.mp3', Sound.MAIN_BUNDLE, (err: unknown) => {
+    const s = new Sound('fire_alarm.ogg', Sound.MAIN_BUNDLE, (err: unknown) => {
       if (err) console.warn('Could not load buzzer:', err);
     });
     s.setNumberOfLoops(-1);
@@ -242,18 +247,41 @@ export function DashboardScreen() {
     return () => { s.stop(); s.release(); };
   }, []);
 
+  // The siren must sound for as long as there is an un-muted fire. We start it, then a
+  // 1 s watchdog verifies it is really playing (the file may not have been loaded yet when
+  // play() was first called, or the OS may have stopped it - audio focus loss, interruption,
+  // playback finished/errored) and restarts it if not. Ending an alert waits 2 s before
+  // stopping so a brief flicker of the fire state is ignored. Mute / siren-off stop at once.
+  const sirenOn = AppSettings.sirenEnabled;
+  const shouldSound = anyFire && !muted && sirenOn;
   useEffect(() => {
-    const shouldBuzz = anyFire && !muted && AppSettings.sirenEnabled;
     const s = soundRef.current;
     if (!s) return;
-    if (shouldBuzz && !buzzing.current) {
+
+    const startIfNeeded = () => {
+      if (!s.isLoaded()) return;                 // not ready yet - the watchdog will retry
+      if (buzzing.current && s.isPlaying()) return;
       buzzing.current = true;
-      // The loop never ends on its own, so this callback only fires if playback stopped or failed
-      // (audio focus lost, player error...). Clearing the flag lets the 1 s tick restart the siren.
-      s.play(() => { buzzing.current = false; });
+      s.setNumberOfLoops(-1);
+      s.play((ok: boolean) => {
+        // Playback ended or failed unexpectedly: allow the watchdog to restart it.
+        if (!ok) console.warn('Siren playback failed');
+        buzzing.current = false;
+      });
+    };
+
+    if (shouldSound) {
+      startIfNeeded();
+      const w = setInterval(startIfNeeded, 1000);
+      return () => clearInterval(w);
     }
-    else if (!shouldBuzz && buzzing.current) { buzzing.current = false; s.stop(); }
-  }, [anyFire, muted, now]);
+
+    if (!buzzing.current) return;
+    const stop = () => { buzzing.current = false; s.stop(); };
+    if (muted || !sirenOn) { stop(); return; }
+    const t = setTimeout(stop, 2000);
+    return () => clearTimeout(t);
+  }, [shouldSound, anyFire, muted, sirenOn]);
 
   // A mute only applies to the alarm it was pressed for; the next fire must sound again.
   useEffect(() => { if (!anyFire) setMuted(false); }, [anyFire]);
@@ -274,20 +302,20 @@ export function DashboardScreen() {
   const toggleSelect = useCallback((s: PlacedSensor) => setSelectedKey((k) => (k === pinKey(s) ? null : pinKey(s))), []);
 
   // ---------- fire-alert data ----------
-  const fireFloorList = anyFire ? computeFireFloors(manager, history, fireLatch) : [];
+  const fireFloorList = anyFire ? computeFireFloors(manager, history, fireLatch, fireStartTimes, AppSettings.priorityEnabled) : [];
   const alertIdx = Math.min(selectedAlertFloorIndex, Math.max(0, fireFloorList.length - 1));
   const alertFloor = fireFloorList[alertIdx] ?? null;
   // Offline is counted per DEVICE (slave), never per sensor: a device with 4 alerting
   // sensors that goes offline counts as 1.
   const offlineDevicesOn = (fl: SiteImageConfig) =>
     new Set(
-      firingSensorsForFloor(manager, fl, fireStartTimes, fireLatch)
+      firingSensorsForFloor(manager, fl, fireStartTimes, fireLatch, AppSettings.priorityEnabled)
         .filter((sn) => manager.isSlaveOffline(sn.slaveId))
         .map((sn) => sn.slaveId),
     ).size;
   const offlineCounts = fireFloorList.map(offlineDevicesOn);
   const offlineDevicesNow = ModbusRtu.slaveIds.filter((id) => manager.isSlaveOffline(id)).length;
-  const firingSensors = alertFloor ? firingSensorsForFloor(manager, alertFloor, fireStartTimes, fireLatch) : [];
+  const firingSensors = alertFloor ? firingSensorsForFloor(manager, alertFloor, fireStartTimes, fireLatch, AppSettings.priorityEnabled) : [];
 
   // Keep the highlighted pin and the footer in sync: if nothing (or a sensor
   // that is not alerting on this floor) is selected, select the first one.
@@ -301,7 +329,7 @@ export function DashboardScreen() {
   /** Left/Right: walk through EVERY alert on EVERY fire floor, floor image switching with it. */
   const stepAlertGlobal = (delta: number) => {
     const entries: { f: number; s: PlacedSensor }[] = [];
-    fireFloorList.forEach((fl, f) => firingSensorsForFloor(manager, fl, fireStartTimes, fireLatch).forEach((s) => entries.push({ f, s })));
+    fireFloorList.forEach((fl, f) => firingSensorsForFloor(manager, fl, fireStartTimes, fireLatch, AppSettings.priorityEnabled).forEach((s) => entries.push({ f, s })));
     if (entries.length < 2) return;
     let cur = selectedKey ? entries.findIndex((e) => e.f === alertIdx && pinKey(e.s) === selectedKey) : -1;
     if (cur < 0) cur = entries.findIndex((e) => e.f === alertIdx);
@@ -632,7 +660,7 @@ export function DashboardScreen() {
                 keyExtractor={(f) => f.id}
                 renderItem={({ item, index }) => {
                   const sel = index === alertIdx;
-                  const n = firingSensorsForFloor(manager, item, fireStartTimes, fireLatch).length;
+                  const n = firingSensorsForFloor(manager, item, fireStartTimes, fireLatch, AppSettings.priorityEnabled).length;
                   return (
                     <FocusPressable
                       ref={(nd: any) => { fireFloorRefs.current[index] = nd; }}
@@ -675,7 +703,7 @@ export function DashboardScreen() {
           floor={alertFloor}
           floors={fireFloorList}
           floorIdx={alertIdx}
-          counts={fireFloorList.map((f) => firingSensorsForFloor(manager, f, fireStartTimes, fireLatch).length)}
+          counts={fireFloorList.map((f) => firingSensorsForFloor(manager, f, fireStartTimes, fireLatch, AppSettings.priorityEnabled).length)}
           offlineCounts={offlineCounts}
           sensors={firingSensors}
           selectedKey={selectedKey}

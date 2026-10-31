@@ -15,9 +15,9 @@ class AppSettingsStore extends Observable {
   /** Local app-lock PIN. Empty string disables the lock. Default '0000'. */
   password = '0000';
   darkModeEnabled = true;
-  pinSize = 44;
-  readonly minPinSize = 18;
-  readonly maxPinSize = 72;
+  pinSize = 20;
+  readonly minPinSize = 10;
+  readonly maxPinSize = 60;
 
   async loadSettings() {
     const get = (k: string) => AsyncStorage.getItem(k);
