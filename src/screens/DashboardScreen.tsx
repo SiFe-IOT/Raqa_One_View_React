@@ -11,7 +11,7 @@ import { FitBox } from '../components/FitBox';
 import { useRs485 } from '../services/RsContext';
 import { Rs485Service } from '../services/rs485Service';
 import { ConfigurationStore } from '../services/configurationStore';
-import { PlacedSensor, SensorTypeUi, SiteImageConfig } from '../services/configTypes';
+import { PlacedSensor, SensorTypeUi, SiteImageConfig, zonesForDeviceType } from '../services/configTypes';
 import { ModbusRtu } from '../services/modbusRtu';
 import { AppSettings, useAppSettings } from '../services/appSettings';
 import { useObservable } from '../services/observable';
@@ -26,25 +26,33 @@ import {
 const FIRE_BG = '#200404';
 const FIRE_TEXT = '#FFFFFF';
 const FIRE_TEXT2 = 'rgba(255,255,255,0.72)';
-const PANEL_WIDTH = 205;       // width of the left side panel
+const PANEL_WIDTH = 160;       // width of the left side panel
 const RIGHT_PANEL_WIDTH = 205; // width of the right side panel (change this to resize it)
+const SCAN_MAX_SLAVES = 31;  // scan range is slave IDs 1..31 (see DeviceScanning)
 const two = (n: number) => String(n).padStart(2, '0');
 const overlay = (o: number) => (AppSettings.darkModeEnabled ? `rgba(255,255,255,${o})` : `rgba(0,0,0,${o})`);
 
+type NavProps = {
+  nextFocusUp?: number;
+  nextFocusDown?: number;
+  nextFocusLeft?: number;
+  nextFocusRight?: number;
+};
+
+/** Returns [callbackRef, nativeHandle] so one control can point D-pad focus at another. */
+function useNodeHandle(): [(n: any) => void, number | undefined] {
+  const [h, setH] = useState<number | undefined>(undefined);
+  const set = useCallback((n: any) => {
+    const v = n ? findNodeHandle(n) : null;
+    if (v) setH(v);
+  }, []);
+  return [set, h];
+}
+
+const handleOf = (n: any): number | undefined => (n ? findNodeHandle(n) ?? undefined : undefined);
+
 /** Local TV-friendly pressable, avoiding a dependency on a missing component module. */
-function FocusPressable({
-  children,
-  style,
-  onPress,
-  onFocus,
-  onBlur,
-  focusable = true,
-  hasTVPreferredFocus,
-  radius = 8,
-  scale = 1,
-  accent = AppTheme.focusAccent,
-  focusFill,
-}: {
+const FocusPressable = React.forwardRef<any, {
   children: React.ReactNode | ((focused: boolean) => React.ReactNode);
   style?: StyleProp<ViewStyle>;
   onPress?: () => void;
@@ -56,12 +64,48 @@ function FocusPressable({
   scale?: number;
   accent?: string;
   focusFill?: string;
-}) {
+  /** Keep Left/Right on this control so focus can't wander off the panel it lives in. */
+  trapHorizontal?: boolean;
+} & NavProps>(function FocusPressable({
+  children,
+  style,
+  onPress,
+  onFocus,
+  onBlur,
+  focusable = true,
+  hasTVPreferredFocus,
+  radius = 8,
+  scale = 1,
+  accent = AppTheme.focusAccent,
+  focusFill,
+  trapHorizontal,
+  nextFocusUp,
+  nextFocusDown,
+  nextFocusLeft,
+  nextFocusRight,
+}, ref) {
   const [focused, setFocused] = useState(false);
+  const inner = useRef<any>(null);
+  const [self, setSelf] = useState<number | undefined>(undefined);
+  const setRefs = useCallback((n: any) => {
+    inner.current = n;
+    if (typeof ref === 'function') ref(n);
+    else if (ref) (ref as React.MutableRefObject<any>).current = n;
+  }, [ref]);
+  useEffect(() => {
+    if (!trapHorizontal) return;
+    const h = findNodeHandle(inner.current);
+    if (h) setSelf(h);
+  }, [trapHorizontal]);
   return (
     <Pressable
+      ref={setRefs}
       focusable={focusable}
       hasTVPreferredFocus={hasTVPreferredFocus}
+      nextFocusUp={nextFocusUp}
+      nextFocusDown={nextFocusDown}
+      nextFocusLeft={trapHorizontal ? self : nextFocusLeft}
+      nextFocusRight={trapHorizontal ? self : nextFocusRight}
       onPress={onPress}
       onFocus={() => { setFocused(true); onFocus?.(); }}
       onBlur={() => { setFocused(false); onBlur?.(); }}
@@ -79,7 +123,7 @@ function FocusPressable({
       {typeof children === 'function' ? children(focused) : children}
     </Pressable>
   );
-}
+});
 
 Sound.setCategory('Playback');
 
@@ -101,12 +145,29 @@ export function DashboardScreen() {
 
   const fireStartTimes = useRef(new Map<string, number>()).current;
 
+  // ---------- D-pad focus map ----------
+  // Focus only ever lands on: siren, menu, floor tabs, floor-device rows (and the
+  // alert footer during a fire). The pins on the floor image are NOT focusable.
+  //   Siren <-> Menu (Left/Right)      Down  -> selected floor tab (footer in alert)
+  //   first floor tab  Up -> Siren/Menu
+  //   floor tab Down -> device list    first device Up -> selected floor tab
+  const [sirenRef, sirenH] = useNodeHandle();
+  const [menuRef, menuH] = useNodeHandle();
+  const anyFireRef = useRef(false);
+  const fireFloorRefs = useRef<Record<number, any>>({});
+  const firstAlertRef = useRef<any>(null);
+  const floorTabRefs = useRef<Record<number, any>>({});
+  const firstDeviceRef = useRef<any>(null);
+  const [, bumpNav] = useState(0);
+  useEffect(() => { const t = setTimeout(() => bumpNav(1), 120); return () => clearTimeout(t); }, []);
+
   // ---------- remote access ----------
   // Dashboard is the launch screen, so Back would exit the app and the menu
   // button would be unreachable. Back / Menu on the remote opens the menu.
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', () => {
       if (!navigation.isFocused()) return false;
+      if (anyFireRef.current) return true;   // fire alert: menu is locked, Back does nothing
       navigation.navigate('Home');
       return true;
     });
@@ -117,7 +178,31 @@ export function DashboardScreen() {
   const floorIndex = Math.min(selectedFloorIndex, Math.max(0, history.length - 1));
   const currentFloor: SiteImageConfig | null = history[floorIndex] ?? null;
 
-  const anyFire = history.some((f) => f.sensors.some((s) => statusFor(manager, s) === 'fire'));
+  const selectedTabH = handleOf(floorTabRefs.current[floorIndex]);
+  const firstDeviceH = handleOf(firstDeviceRef.current);
+  const topBarTarget = AppSettings.sirenEnabled ? sirenH : menuH;
+  const alertTopTarget = AppSettings.sirenEnabled ? sirenH : undefined; // menu button is hidden during a fire
+
+  // Fire latch: a pin that was in fire stays in fire if its device then goes offline.
+  // Cleared only when the device is back online and no longer reports fire.
+  const fireLatch = useRef(new Set<string>()).current;
+  {
+    const present = new Set<string>();
+    for (const f of history)
+      for (const sn of f.sensors) {
+        const k = pinKey(sn);
+        present.add(k);
+        const raw = statusFor(manager, sn);       // raw (un-latched) status
+        if (raw === 'fire') fireLatch.add(k);
+        else if (raw !== 'offline' && raw !== 'unknown') fireLatch.delete(k);  // only a definite non-fire reading releases it
+      }
+    for (const k of [...fireLatch]) if (!present.has(k)) fireLatch.delete(k);
+  }
+  const latchSig = [...fireLatch].sort().join(',');
+  const st = (sn: PlacedSensor) => statusFor(manager, sn, fireLatch);
+
+  const anyFire = history.some((f) => f.sensors.some((sn) => st(sn) === 'fire'));
+  anyFireRef.current = anyFire;
 
   // ---------- 1s tick: clock, buzzer, fire start times ----------
   // While another screen is on top there is nothing to repaint, so tick slowly
@@ -130,15 +215,19 @@ export function DashboardScreen() {
 
   useEffect(() => {
     const live = new Set<string>();
+    let newFire = false;
     for (const f of store.history)
       for (const s of f.sensors)
-        if (statusFor(manager, s) === 'fire') {
+        if (statusFor(manager, s, fireLatch) === 'fire') {
           const k = pinKey(s);
           live.add(k);
-          if (!fireStartTimes.has(k)) fireStartTimes.set(k, Date.now());
+          if (!fireStartTimes.has(k)) { fireStartTimes.set(k, Date.now()); newFire = true; }
         }
     for (const k of [...fireStartTimes.keys()]) if (!live.has(k)) fireStartTimes.delete(k);
-  }, [now, manager, store, fireStartTimes]);
+    // A NEW fire (a sensor that was not already in alert) always un-mutes the siren,
+    // even if the operator muted an earlier alarm that is still active.
+    if (newFire) setMuted(false);
+  }, [now, manager, store, fireStartTimes, fireLatch]);
 
   // ---------- buzzer ----------
   const soundRef = useRef<any>(null);
@@ -157,7 +246,12 @@ export function DashboardScreen() {
     const shouldBuzz = anyFire && !muted && AppSettings.sirenEnabled;
     const s = soundRef.current;
     if (!s) return;
-    if (shouldBuzz && !buzzing.current) { buzzing.current = true; s.play(); }
+    if (shouldBuzz && !buzzing.current) {
+      buzzing.current = true;
+      // The loop never ends on its own, so this callback only fires if playback stopped or failed
+      // (audio focus lost, player error...). Clearing the flag lets the 1 s tick restart the siren.
+      s.play(() => { buzzing.current = false; });
+    }
     else if (!shouldBuzz && buzzing.current) { buzzing.current = false; s.stop(); }
   }, [anyFire, muted, now]);
 
@@ -165,11 +259,12 @@ export function DashboardScreen() {
   useEffect(() => { if (!anyFire) setMuted(false); }, [anyFire]);
 
   // ---------- counts ----------
-  const devicesTotalGlobal = ModbusRtu.slaveIds.length;
-  const devicesOnlineGlobal = ModbusRtu.slaveIds.filter((id) => !manager.isSlaveOffline(id)).length;
-  const sensorsTotalGlobal = history.reduce((n, f) => n + f.sensors.length, 0);
-  const sensorsOnlineGlobal = history.reduce(
-    (n, f) => n + f.sensors.filter((s) => !manager.isSlaveOffline(s.slaveId)).length, 0);
+  // Devices: scanned (found) devices out of the 31 possible slave IDs.
+  const devicesScanned = ModbusRtu.slaveIds.length;
+  // Sensors: configured (placed on a floor) out of every zone the scanned devices offer.
+  const sensorsConfigured = history.reduce((n, f) => n + f.sensors.length, 0);
+  const sensorsAvailable = ModbusRtu.slaveIds.reduce(
+    (n, id) => n + zonesForDeviceType(ModbusRtu.slaveTypeMap.get(id) ?? 'fsa').length, 0);
 
   const floorDeviceIds = (f: SiteImageConfig) => [...new Set(f.sensors.map((s) => s.slaveId))].sort((a, b) => a - b);
   const floorDevicesOnline = (f: SiteImageConfig) => floorDeviceIds(f).filter((id) => !manager.isSlaveOffline(id)).length;
@@ -179,10 +274,20 @@ export function DashboardScreen() {
   const toggleSelect = useCallback((s: PlacedSensor) => setSelectedKey((k) => (k === pinKey(s) ? null : pinKey(s))), []);
 
   // ---------- fire-alert data ----------
-  const fireFloorList = anyFire ? computeFireFloors(manager, history) : [];
+  const fireFloorList = anyFire ? computeFireFloors(manager, history, fireLatch) : [];
   const alertIdx = Math.min(selectedAlertFloorIndex, Math.max(0, fireFloorList.length - 1));
   const alertFloor = fireFloorList[alertIdx] ?? null;
-  const firingSensors = alertFloor ? firingSensorsForFloor(manager, alertFloor, fireStartTimes) : [];
+  // Offline is counted per DEVICE (slave), never per sensor: a device with 4 alerting
+  // sensors that goes offline counts as 1.
+  const offlineDevicesOn = (fl: SiteImageConfig) =>
+    new Set(
+      firingSensorsForFloor(manager, fl, fireStartTimes, fireLatch)
+        .filter((sn) => manager.isSlaveOffline(sn.slaveId))
+        .map((sn) => sn.slaveId),
+    ).size;
+  const offlineCounts = fireFloorList.map(offlineDevicesOn);
+  const offlineDevicesNow = ModbusRtu.slaveIds.filter((id) => manager.isSlaveOffline(id)).length;
+  const firingSensors = alertFloor ? firingSensorsForFloor(manager, alertFloor, fireStartTimes, fireLatch) : [];
 
   // Keep the highlighted pin and the footer in sync: if nothing (or a sensor
   // that is not alerting on this floor) is selected, select the first one.
@@ -196,7 +301,7 @@ export function DashboardScreen() {
   /** Left/Right: walk through EVERY alert on EVERY fire floor, floor image switching with it. */
   const stepAlertGlobal = (delta: number) => {
     const entries: { f: number; s: PlacedSensor }[] = [];
-    fireFloorList.forEach((fl, f) => firingSensorsForFloor(manager, fl, fireStartTimes).forEach((s) => entries.push({ f, s })));
+    fireFloorList.forEach((fl, f) => firingSensorsForFloor(manager, fl, fireStartTimes, fireLatch).forEach((s) => entries.push({ f, s })));
     if (entries.length < 2) return;
     let cur = selectedKey ? entries.findIndex((e) => e.f === alertIdx && pinKey(e.s) === selectedKey) : -1;
     if (cur < 0) cur = entries.findIndex((e) => e.f === alertIdx);
@@ -217,7 +322,7 @@ export function DashboardScreen() {
   // the pins; it keeps FloorBody (and the big SVG) from repainting every second.
   const statusTick = Math.floor(now / 5000);
   const dataVersion = manager.changes.getVersion();
-  const floorProps = { manager, selectedKey, selectSensor, toggleSelect, statusTick, dataVersion, dark: AppSettings.darkModeEnabled, pinSize: AppSettings.pinSize };
+  const floorProps = { manager, fireLatch, latchSig, selectedKey, selectSensor, toggleSelect, statusTick, dataVersion, dark: AppSettings.darkModeEnabled, pinSize: AppSettings.pinSize };
 
   // ---------- top bar ----------
   const renderTopBar = (alertMode = false) => {
@@ -226,6 +331,7 @@ export function DashboardScreen() {
     const d = new Date(now);
     const fg = isFire ? FIRE_TEXT2 : AppTheme.textSecondary;
     const accent = isFire ? C.tealAccent : AppTheme.focusAccent;
+    const downTarget = alertMode ? handleOf(fireFloorRefs.current[alertIdx]) : selectedTabH;
     return (
       <View style={[styles.topBar, { backgroundColor: isFire ? '#2A0606' : AppTheme.card, borderBottomColor: AppTheme.divider }]}>
         <Image
@@ -236,7 +342,7 @@ export function DashboardScreen() {
           resizeMode="contain"
         />
         <View pointerEvents="none" style={styles.topCenter}>
-          <Text style={{ color: isFire ? C.redAccent : AppTheme.ok, fontSize: 18, fontWeight: 'bold' }}>
+          <Text style={{ color: isFire ? C.redAccent : AppTheme.ok, fontSize: 16, fontWeight: 'bold' }}>
             {isFire ? 'Fire Alert' : 'Normal'}
           </Text>
         </View>
@@ -244,19 +350,46 @@ export function DashboardScreen() {
         <Text style={[styles.clock, { color: fg }]}>
           {`${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}\n${two(d.getDate())}/${two(d.getMonth() + 1)}/${d.getFullYear()}`}
         </Text>
+        {alertMode && offlineDevicesNow > 0 && (
+          <View style={[styles.conn, { borderColor: C.orange, flexDirection: 'row', alignItems: 'center' }]}>
+            <OfflineBlink size={14} />
+            <Text style={{ color: C.orange, fontSize: 12, fontWeight: '600', marginLeft: 6 }}>
+              {`Offline devices: ${offlineDevicesNow}`}
+            </Text>
+          </View>
+        )}
         <View style={[styles.conn, { borderColor: connected ? accent : C.orange }]}>
-          <Text style={{ color: connected ? accent : C.orange, fontSize: 14, fontWeight: '600' }}>
+          <Text style={{ color: connected ? accent : C.orange, fontSize: 12, fontWeight: '600' }}>
             {manager.connectionStatus}
           </Text>
         </View>
         {AppSettings.sirenEnabled && (
-          <IconBtn accent={accent} onPress={() => setMuted((m) => !m)}>
-            <Icon name={muted ? 'volume-off' : 'volume-up'} color={fg} />
+          <IconBtn
+            btnRef={sirenRef}
+            accent={accent}
+            onPress={() => setMuted((m) => !m)}
+            nextFocusUp={sirenH}
+            nextFocusLeft={sirenH}
+            nextFocusRight={alertMode ? sirenH : menuH}
+            nextFocusDown={downTarget}
+          >
+            <Icon name={muted ? 'volume-off' : 'volume-up'} size={18} color={fg} />
           </IconBtn>
         )}
-        <IconBtn accent={accent} onPress={() => navigation.navigate('Home')}>
-          <Icon name="menu" color={fg} />
-        </IconBtn>
+        {/* Menu is locked while a fire alert is showing. */}
+        {!alertMode && (
+          <IconBtn
+            btnRef={menuRef}
+            accent={accent}
+            onPress={() => navigation.navigate('Home')}
+            nextFocusUp={menuH}
+            nextFocusRight={menuH}
+            nextFocusLeft={AppSettings.sirenEnabled ? sirenH : menuH}
+            nextFocusDown={downTarget}
+          >
+            <Icon name="menu" size={18} color={fg} />
+          </IconBtn>
+        )}
       </View>
     );
   };
@@ -266,7 +399,7 @@ export function DashboardScreen() {
     <View style={[styles.floorTabs, { borderRightColor: AppTheme.divider, borderBottomColor: AppTheme.divider }]}>
       <View style={styles.floorHeader}>
         <Icon name="layers" size={16} color={AppTheme.textPrimary} />
-        <Text style={{ color: AppTheme.textPrimary, fontSize: 15, fontWeight: 'bold', marginLeft: 7 }}>Floor</Text>
+        <Text style={{ color: AppTheme.textPrimary, fontSize: 13, fontWeight: 'bold', marginLeft: 7 }}>Floor</Text>
       </View>
       <ScrollView>
         {history.map((f, i) => {
@@ -274,7 +407,10 @@ export function DashboardScreen() {
           return (
             <FocusPressable
               key={f.id}
+              ref={(n: any) => { floorTabRefs.current[i] = n; }}
               hasTVPreferredFocus={i === floorIndex}
+              nextFocusUp={i === 0 ? topBarTarget : undefined}
+              nextFocusRight={firstDeviceH}
               radius={8}
               scale={1.03}
               onPress={() => { setSelectedFloorIndex(i); setSelectedKey(null); }}
@@ -285,11 +421,11 @@ export function DashboardScreen() {
                 <>
                   <View style={[styles.selBar, { backgroundColor: sel || foc ? AppTheme.focusAccent : 'transparent' }]} />
                   <Text
-                    numberOfLines={1}
                     style={{
+                      flex: 1,
                       color: foc ? AppTheme.focusAccent : sel ? AppTheme.textPrimary : AppTheme.textSecondary,
                       fontWeight: sel || foc ? 'bold' : 'normal',
-                      fontSize: 15,
+                      fontSize: 13,
                     }}
                   >
                     {f.floorLabel}
@@ -305,19 +441,22 @@ export function DashboardScreen() {
 
   const renderDeviceList = (floor: SiteImageConfig) => {
     if (floor.sensors.length === 0) {
-      return <Text style={{ color: AppTheme.textSecondary, fontSize: 14, padding: 12 }}>No sensors placed on this floor yet</Text>;
+      return <Text style={{ color: AppTheme.textSecondary, fontSize: 12, padding: 12 }}>No sensors placed on this floor yet</Text>;
     }
     return (
       <FlatList
         data={floor.sensors}
         keyExtractor={pinKey}
-        renderItem={({ item }) => {
+        renderItem={({ item, index }) => {
           const status = statusFor(manager, item);
           const color = colorForStatus(status);
           const key = pinKey(item);
           const sel = selectedKey === key;
           return (
             <FocusPressable
+              ref={index === 0 ? (n: any) => { firstDeviceRef.current = n; } : undefined}
+              nextFocusUp={index === 0 ? selectedTabH : undefined}
+              nextFocusLeft={selectedTabH}
               radius={8}
               scale={1.03}
               onPress={() => selectSensor(item)}
@@ -333,13 +472,13 @@ export function DashboardScreen() {
                       numberOfLines={1}
                       style={{
                         color: foc ? AppTheme.focusAccent : sel ? AppTheme.textPrimary : AppTheme.textSecondary,
-                        fontSize: 14,
+                        fontSize: 12,
                         fontWeight: foc || sel ? 'bold' : 'normal',
                       }}
                     >
                       {item.name}
                     </Text>
-                    <Text style={{ color, fontSize: 12, marginTop: 2, opacity: 0.9 }}>{status}</Text>
+                    <Text style={{ color, fontSize: 10, marginTop: 2, opacity: 0.9 }}>{status}</Text>
                   </View>
                 </>
               )}
@@ -355,14 +494,14 @@ export function DashboardScreen() {
     if (!f) return null;
     return (
       <View style={[styles.left, { backgroundColor: AppTheme.panel }]}>
-        <View style={{ height: 240 }}>{renderFloorTabs()}</View>
+        <View style={{ height: 200 }}>{renderFloorTabs()}</View>
         <View style={[styles.hr, { backgroundColor: AppTheme.divider }]} />
-        <Text style={{ color: AppTheme.textPrimary, fontWeight: 'bold', fontSize: 15, padding: 12, paddingBottom: 6 }}>
+        <Text style={{ color: AppTheme.textPrimary, fontWeight: 'bold', fontSize: 13, padding: 10, paddingBottom: 4 }}>
           {f.floorLabel} device
         </Text>
         <View style={{ flex: 1 }}>{renderDeviceList(f)}</View>
         <View style={[styles.hr, { backgroundColor: AppTheme.divider }]} />
-        <Text style={{ color: AppTheme.textSecondary, fontSize: 13, padding: 12 }}>
+        <Text style={{ color: AppTheme.textSecondary, fontSize: 11, padding: 8 }}>
           Devices: {floorDevicesOnline(f)}/{floorDeviceIds(f).length} online
         </Text>
       </View>
@@ -377,28 +516,28 @@ export function DashboardScreen() {
         style={[styles.right, { backgroundColor: AppTheme.panel }]}
         contentContainerStyle={{ paddingTop: 14, paddingLeft: 10, paddingRight: 8, paddingBottom: 10 }}
       >
-        <Text style={{ color: AppTheme.textPrimary, fontSize: 15, fontWeight: 'bold' }}>Status</Text>
+        <Text style={{ color: AppTheme.textPrimary, fontSize: 13, fontWeight: 'bold' }}>Status</Text>
         <View style={{ height: 10 }} />
-        <SideStat label="Devices" value={`${devicesOnlineGlobal}/${devicesTotalGlobal}`} />
+        <SideStat label="Devices" value={`${devicesScanned}/${SCAN_MAX_SLAVES}`} />
         <View style={{ height: 8 }} />
-        <SideStat label="Sensors" value={`${sensorsOnlineGlobal}/${sensorsTotalGlobal}`} />
+        <SideStat label="Sensors" value={`${sensorsConfigured}/${sensorsAvailable}`} />
         <View style={{ height: 16 }} />
-        <Text numberOfLines={1} style={{ color: C.orange, fontSize: 14, fontWeight: 'bold' }}>Offline Devices</Text>
+        <Text numberOfLines={1} style={{ color: C.orange, fontSize: 12, fontWeight: 'bold' }}>Offline Devices</Text>
         <View style={{ height: 6 }} />
         {offlineIds.length === 0 ? (
-          <Text style={{ color: AppTheme.textSecondary, fontSize: 13 }}>None</Text>
+          <Text style={{ color: AppTheme.textSecondary, fontSize: 11 }}>None</Text>
         ) : (
           <>
-            {offlineIds.map((id) => (
-              <Text key={id} numberOfLines={1} style={{ color: AppTheme.textSecondary, fontSize: 13, paddingVertical: 2 }}>Device {id}</Text>
-            ))}
+            <Text numberOfLines={1} style={{ color: AppTheme.textSecondary, fontSize: 11, paddingVertical: 2 }}>
+              Device {offlineIds.length}
+            </Text>
             {affected.length > 0 && (
               <>
-                <Text numberOfLines={1} style={{ color: AppTheme.textSecondary, fontSize: 14, fontWeight: 'bold', marginTop: 14, marginBottom: 6 }}>
+                <Text numberOfLines={1} style={{ color: AppTheme.textSecondary, fontSize: 12, fontWeight: 'bold', marginTop: 14, marginBottom: 6 }}>
                   Floors affected
                 </Text>
                 {affected.map((f) => (
-                  <Text key={f.id} numberOfLines={1} style={{ color: AppTheme.textSecondary, fontSize: 13, paddingVertical: 2 }}>{f.floorLabel}</Text>
+                  <Text key={f.id} numberOfLines={1} style={{ color: AppTheme.textSecondary, fontSize: 11, paddingVertical: 2 }}>{f.floorLabel}</Text>
                 ))}
               </>
             )}
@@ -415,10 +554,10 @@ export function DashboardScreen() {
     const sensorsOnline = floorSensorsOnline(f);
     const devicesTotal = floorDeviceIds(f).length;
     const devicesOnline = floorDevicesOnline(f);
-    const cell = { flex: 1, fontSize: 14 } as const;
+    const cell = { flex: 1, fontSize: 12 } as const;
     return (
       <View style={[styles.bottom, { backgroundColor: AppTheme.card, borderTopColor: AppTheme.divider }]}>
-        <Text numberOfLines={1} style={{ width: 120, color: AppTheme.focusAccent, fontWeight: 'bold', fontSize: 15 }}>{f.floorLabel}</Text>
+        <Text numberOfLines={1} style={{ width: 120, color: AppTheme.focusAccent, fontWeight: 'bold', fontSize: 13 }}>{f.floorLabel}</Text>
         <View style={{ width: 1, alignSelf: 'stretch', backgroundColor: AppTheme.divider }} />
         <Text style={[cell, { color: AppTheme.textSecondary, paddingLeft: 12 }]}>Devices: {devicesOnline}/{devicesTotal}</Text>
         <Text style={[cell, { color: AppTheme.textSecondary }]}>Sensors: {sensorsOnline}/{sensorsTotal}</Text>
@@ -429,6 +568,54 @@ export function DashboardScreen() {
   };
 
   // ---------- fire-alert layout ----------
+  /** Right side (slim): device name + sensor name for every alerting sensor on the selected fire floor. */
+  const renderAlertSensors = () => {
+    const floorH = handleOf(fireFloorRefs.current[alertIdx]);
+    return (
+      <View style={styles.alertPanel}>
+        <View style={styles.alertPanelHeader}>
+          <Text numberOfLines={1} style={{ flex: 1, color: C.redAccent, fontSize: 12, fontWeight: 'bold' }}>
+            {`${alertFloor!.floorLabel} sensors`}
+          </Text>
+          <Text style={{ color: FIRE_TEXT2, fontSize: 10 }}>{firingSensors.length}</Text>
+        </View>
+        <FlatList
+          style={{ flex: 1 }}
+          contentContainerStyle={{ padding: 6 }}
+          data={firingSensors}
+          keyExtractor={pinKey}
+          renderItem={({ item, index }) => {
+            const key = pinKey(item);
+            const sel = selectedKey === key;
+            const off = manager.isSlaveOffline(item.slaveId);
+            return (
+              <FocusPressable
+                ref={index === 0 ? (nd: any) => { firstAlertRef.current = nd; } : undefined}
+                nextFocusUp={index === 0 ? floorH : undefined}
+                nextFocusLeft={floorH}
+                accent={C.redAccent}
+                focusFill="rgba(244,67,54,0.25)"
+                radius={8}
+                scale={1.03}
+                onPress={() => setSelectedKey(key)}
+                onFocus={() => setSelectedKey(key)}
+                style={[styles.sensorCard, { backgroundColor: sel ? 'rgba(244,67,54,0.14)' : 'transparent' }]}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text numberOfLines={1} style={{ color: sel ? FIRE_TEXT : FIRE_TEXT2, fontSize: 12, fontWeight: sel ? 'bold' : '600' }}>
+                    {item.name}
+                  </Text>
+                  <Text numberOfLines={1} style={{ color: FIRE_TEXT2, fontSize: 10, marginTop: 2 }}>{item.zoneLabel}</Text>
+                </View>
+                {off && <OfflineBlink size={15} />}
+              </FocusPressable>
+            );
+          }}
+        />
+      </View>
+    );
+  };
+
   const renderFireAlert = () => {
     if (!alertFloor) return null;
     return (
@@ -436,58 +623,60 @@ export function DashboardScreen() {
         {renderTopBar(true)}
         <View style={{ flex: 1, flexDirection: 'row' }}>
           <View style={styles.fireList}>
-            <Text style={{ color: C.redAccent, fontSize: 14, fontWeight: 'bold', padding: 12, paddingTop: 14, paddingBottom: 8 }}>
+            <Text style={{ color: C.redAccent, fontSize: 12, fontWeight: 'bold', padding: 10, paddingTop: 10, paddingBottom: 6 }}>
               Fire Floor
             </Text>
-            <FlatList
-              data={fireFloorList}
-              keyExtractor={(f) => f.id}
-              renderItem={({ item, index }) => {
-                const sel = index === alertIdx;
-                return (
-                  <FocusPressable
-                    focusable
-                    accent={C.redAccent}
-                    focusFill="rgba(244,67,54,0.25)"
-                    radius={8}
-                    scale={1.03}
-                    onPress={() => { setSelectedAlertFloorIndex(index); setSelectedKey(null); }}
-                    onFocus={() => { if (index !== alertIdx) { setSelectedAlertFloorIndex(index); setSelectedKey(null); } }}
-                    style={[styles.fireItem, { backgroundColor: sel ? 'rgba(244,67,54,0.12)' : 'transparent' }]}
-                  >
-                    <View style={[styles.selBar, { backgroundColor: sel ? C.redAccent : 'transparent' }]} />
-                    <Icon name="local-fire-department" size={18} color={C.redAccent} />
-                    <Text
-                      numberOfLines={1}
-                      style={{ flex: 1, marginLeft: 8, fontSize: 15, color: sel ? FIRE_TEXT : FIRE_TEXT2, fontWeight: sel ? 'bold' : 'normal' }}
+            <View style={{ flex: 1 }}>
+              <FlatList
+                data={fireFloorList}
+                keyExtractor={(f) => f.id}
+                renderItem={({ item, index }) => {
+                  const sel = index === alertIdx;
+                  const n = firingSensorsForFloor(manager, item, fireStartTimes, fireLatch).length;
+                  return (
+                    <FocusPressable
+                      ref={(nd: any) => { fireFloorRefs.current[index] = nd; }}
+                      hasTVPreferredFocus={sel}
+                      nextFocusUp={index === 0 ? alertTopTarget : undefined}
+                      nextFocusRight={handleOf(firstAlertRef.current)}
+                      accent={C.redAccent}
+                      focusFill="rgba(244,67,54,0.25)"
+                      radius={8}
+                      scale={1.03}
+                      onPress={() => { setSelectedAlertFloorIndex(index); setSelectedKey(null); }}
+                      onFocus={() => { if (index !== alertIdx) { setSelectedAlertFloorIndex(index); setSelectedKey(null); } }}
+                      style={[styles.fireItem, { backgroundColor: sel ? 'rgba(244,67,54,0.12)' : 'transparent' }]}
                     >
-                      {item.floorLabel}
-                    </Text>
-                    {firingSensorsForFloor(manager, item, fireStartTimes).length > 0 && (
-                      <View style={styles.countBadge}>
-                        <Text style={{ color: C.white, fontSize: 13, fontWeight: 'bold' }}>
-                          {firingSensorsForFloor(manager, item, fireStartTimes).length}
+                      <View style={[styles.selBar, { backgroundColor: sel ? C.redAccent : 'transparent' }]} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ fontSize: 13, color: sel ? FIRE_TEXT : FIRE_TEXT2, fontWeight: sel ? 'bold' : 'normal' }}>
+                          {item.floorLabel}
                         </Text>
+                        <Text style={{ fontSize: 10, color: C.redAccent, marginTop: 1 }}>{`Alert - ${n}`}</Text>
                       </View>
-                    )}
-                  </FocusPressable>
-                );
-              }}
-            />
+                      {offlineCounts[index] > 0 && (
+                        <View style={{ marginLeft: 6, alignSelf: 'center' }}>
+                          <OfflineBlink size={16} />
+                        </View>
+                      )}
+                    </FocusPressable>
+                  );
+                }}
+              />
+            </View>
           </View>
           <View style={{ flex: 1 }}>
-            <View style={[styles.alertHeader, { backgroundColor: AppTheme.card }]}>
-              <Text style={{ color: C.redAccent, fontSize: 14, fontWeight: 'bold' }}>{alertFloor.floorLabel} image</Text>
-            </View>
             <View style={{ flex: 1 }}><FloorBody floor={alertFloor} onlyFiring {...floorProps} /></View>
           </View>
+          {renderAlertSensors()}
         </View>
 
         <AlertFooter
           floor={alertFloor}
           floors={fireFloorList}
           floorIdx={alertIdx}
-          counts={fireFloorList.map((f) => firingSensorsForFloor(manager, f, fireStartTimes).length)}
+          counts={fireFloorList.map((f) => firingSensorsForFloor(manager, f, fireStartTimes, fireLatch).length)}
+          offlineCounts={offlineCounts}
           sensors={firingSensors}
           selectedKey={selectedKey}
           now={now}
@@ -496,6 +685,7 @@ export function DashboardScreen() {
           onFloor={stepAlertFloor}
           onPickFloor={(i) => { setSelectedAlertFloorIndex(i); setSelectedKey(null); }}
           onPickSensor={(i) => setSelectedKey(pinKey(firingSensors[i]))}
+          isOffline={(sn) => manager.isSlaveOffline(sn.slaveId)}
         />
       </View>
     );
@@ -536,6 +726,8 @@ const FloorBody = React.memo(function FloorBody(props: {
   floor: SiteImageConfig | null;
   onlyFiring?: boolean;
   manager: Rs485Service;
+  fireLatch: ReadonlySet<string>;
+  latchSig: string;     // repaint the memoised view when the latch changes
   selectedKey: string | null;
   selectSensor: (s: PlacedSensor) => void;
   toggleSelect: (s: PlacedSensor) => void;
@@ -544,7 +736,7 @@ const FloorBody = React.memo(function FloorBody(props: {
   dark: boolean;        // theme change must repaint the memoised view
   pinSize: number;
 }) {
-  const { floor, onlyFiring, manager, selectedKey, selectSensor, toggleSelect } = props;
+  const { floor, onlyFiring, manager, fireLatch, selectedKey, selectSensor, toggleSelect } = props;
   const { info, error, isCurrent } = useSvg(floor?.imagePath ?? null);
   const [box, setBox] = useState({ w: 0, h: 0 });
   if (!floor) return <EmptyState />;
@@ -552,7 +744,7 @@ const FloorBody = React.memo(function FloorBody(props: {
     return (
       <View style={styles.center}>
         <Icon name="broken-image" size={48} color={C.grey} />
-        <Text style={{ color: C.grey, fontSize: 15, textAlign: 'center', marginTop: 8 }}>
+        <Text style={{ color: C.grey, fontSize: 13, textAlign: 'center', marginTop: 8 }}>
           {'Floor plan image cannot be opened.\nLoad it again from the Configuration screen.'}
         </Text>
       </View>
@@ -560,7 +752,7 @@ const FloorBody = React.memo(function FloorBody(props: {
   }
   if (!info) return <SvgSpinner />;
 
-  const pins = onlyFiring ? floor.sensors.filter((s) => statusFor(manager, s) === 'fire') : floor.sensors;
+  const pins = onlyFiring ? floor.sensors.filter((s) => statusFor(manager, s, fireLatch) === 'fire') : floor.sensors;
   const pinSize = AppSettings.pinSize;
   const rippleBox = pinSize * 3;
   const onLayout = (e: LayoutChangeEvent) => setBox({ w: e.nativeEvent.layout.width, h: e.nativeEvent.layout.height });
@@ -570,9 +762,10 @@ const FloorBody = React.memo(function FloorBody(props: {
         <View onLayout={onLayout} style={[styles.floorCanvas, { backgroundColor: C.white }]}>
           <SvgFill xml={info.xml} uri={info.uri} />
           {isCurrent && pins.map((s) => {
-            const status = statusFor(manager, s);
+            const status = statusFor(manager, s, fireLatch);
             const color = colorForStatus(status);
             const fire = status === 'fire';
+            const deadFire = fire && manager.isSlaveOffline(s.slaveId); // fire latched, device now offline
             const key = pinKey(s);
             const selected = selectedKey === key;
             return (
@@ -587,18 +780,17 @@ const FloorBody = React.memo(function FloorBody(props: {
                 }}
               >
                 {fire && <FireRipple size={rippleBox} color={C.redAccent} />}
+                {/* Pins are display-only for the D-pad: the device list drives selection.
+                    Touch / mouse taps still select. */}
                 <FocusPressable
-                  accent={C.teal700}
-                  focusFill={color}
-                  radius={pinSize / 2 + 4}
-                  scale={1.3}
+                  focusable={false}
                   onPress={() => toggleSelect(s)}
-                  onFocus={() => selectSensor(s)}
                   style={{
                     width: pinSize + 8, height: pinSize + 8, borderRadius: (pinSize + 8) / 2, backgroundColor: color,
                     alignItems: 'center', justifyContent: 'center',
                     borderWidth: selected ? 3 : 2,
                     borderColor: selected ? C.black : 'transparent',
+                    transform: [{ scale: selected ? 1.3 : 1 }],
                     ...(fire ? { shadowColor: C.red, shadowOpacity: 0.6, shadowRadius: 16, elevation: 10 } : null),
                   }}
                 >
@@ -608,6 +800,11 @@ const FloorBody = React.memo(function FloorBody(props: {
                     color={C.white}
                   />
                 </FocusPressable>
+                {deadFire && (
+                  <View pointerEvents="none" style={{ position: 'absolute', right: rippleBox / 2 - pinSize / 2 - 8, top: rippleBox / 2 - pinSize / 2 - 8 }}>
+                    <OfflineBlink size={12} badge />
+                  </View>
+                )}
               </View>
             );
           })}
@@ -616,10 +813,34 @@ const FloorBody = React.memo(function FloorBody(props: {
   );
 });
 
-/** Top-bar button that shows a clear ring when reached with the D-pad. */
-function IconBtn({ onPress, children, accent }: { onPress: () => void; children: React.ReactNode; accent?: string }) {
+const BLINK_GRAY = '#9E9E9E';
+const BLINK_YELLOW = '#FFD600';
+
+/** Offline symbol that blinks gray <-> yellow (as a plain icon, or as a round badge on a pin). */
+function OfflineBlink({ size, badge }: { size: number; badge?: boolean }) {
+  const [on, setOn] = useState(true);
+  useEffect(() => {
+    const t = setInterval(() => setOn((v) => !v), 500);
+    return () => clearInterval(t);
+  }, []);
+  const c = on ? BLINK_YELLOW : BLINK_GRAY;
+  if (!badge) return <Icon name="wifi-off" size={size} color={c} />;
   return (
-    <FocusPressable focusable accent={accent} radius={10} scale={1.12} onPress={onPress} style={styles.iconBtn}>
+    <View style={{ backgroundColor: on ? BLINK_GRAY : BLINK_YELLOW, borderRadius: (size + 6) / 2, padding: 2 }}>
+      <Icon name="wifi-off" size={size} color={on ? BLINK_YELLOW : '#212121'} />
+    </View>
+  );
+}
+
+/** Top-bar button that shows a clear ring when reached with the D-pad. */
+function IconBtn({ onPress, children, accent, btnRef, ...nav }: {
+  onPress: () => void;
+  children: React.ReactNode;
+  accent?: string;
+  btnRef?: (n: any) => void;
+} & NavProps) {
+  return (
+    <FocusPressable ref={btnRef} focusable accent={accent} radius={10} scale={1.12} onPress={onPress} style={styles.iconBtn} {...nav}>
       {children}
     </FocusPressable>
   );
@@ -628,8 +849,8 @@ function IconBtn({ onPress, children, accent }: { onPress: () => void; children:
 function SideStat({ label, value }: { label: string; value: string }) {
   return (
     <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-      <Text style={{ color: AppTheme.textSecondary, fontSize: 14 }}>{label}</Text>
-      <Text style={{ color: AppTheme.textPrimary, fontSize: 14, fontWeight: 'bold' }}>{value}</Text>
+      <Text style={{ color: AppTheme.textSecondary, fontSize: 12 }}>{label}</Text>
+      <Text style={{ color: AppTheme.textPrimary, fontSize: 12, fontWeight: 'bold' }}>{value}</Text>
     </View>
   );
 }
@@ -648,6 +869,8 @@ function AlertFooter(props: {
   floors: SiteImageConfig[];
   floorIdx: number;
   counts: number[];
+  /** Offline (latched-fire) alerts per fire floor. */
+  offlineCounts: number[];
   sensors: PlacedSensor[];
   selectedKey: string | null;
   now: number;
@@ -656,92 +879,38 @@ function AlertFooter(props: {
   onFloor: (d: number) => void;
   onPickFloor: (i: number) => void;
   onPickSensor: (i: number) => void;
+  /** True when the sensor's device is offline (fire latched). */
+  isOffline?: (s: PlacedSensor) => boolean;
 }) {
   const {
     floor,
     floors,
     floorIdx,
     counts,
+    offlineCounts,
     sensors,
     selectedKey,
     now,
     startTimes,
   } = props;
 
-  // Fix: use a compatible ref type for React Native Pressable.
-  const ref = useRef<any>(null);
-
-  const [self, setSelf] = useState<number | undefined>(undefined);
-  const [foc, setFoc] = useState(false);
-
-  useEffect(() => {
-    const h = findNodeHandle(ref.current);
-
-    if (h) {
-      setSelf(h);
-    }
-
-    // Claim remote focus as soon as the alert starts.
-    const t = setTimeout(() => {
-      ref.current?.requestTVFocus?.();
-    }, 80);
-
-    return () => clearTimeout(t);
-  }, []);
-
+  // Display only: the D-pad lives in the left column (floors -> sensors).
+  // CH+ / CH- still jump between fire floors from anywhere.
   useRemoteKeys((k) => {
-    if (k === 'right') {
-      props.onGlobal(1);
-    } else if (k === 'left') {
-      props.onGlobal(-1);
-    } else if (k === 'down' || k === 'select' || k === 'next') {
-      props.onFloor(1);
-    } else if (k === 'prev') {
-      props.onFloor(-1);
-    }
-  }, foc);
-
-  const border = foc ? C.white : C.redAccent;
+    if (k === 'next') props.onFloor(1);
+    else if (k === 'prev') props.onFloor(-1);
+  });
 
   const wrap = (children: React.ReactNode) => (
-    <Pressable
-      ref={ref}
-      focusable
-      hasTVPreferredFocus
-      onPress={() => {
-        // Navigation keys are handled by useRemoteKeys.
-      }}
-      onFocus={() => setFoc(true)}
-      onBlur={() => setFoc(false)}
-      nextFocusDown={self}
-      nextFocusLeft={self}
-      nextFocusRight={self}
-      style={[
-        styles.alertFooter,
-        {
-          borderTopColor: border,
-          borderTopWidth: foc ? 3 : 1,
-          ...(foc
-            ? {
-                backgroundColor: '#2E0808',
-                shadowColor: C.redAccent,
-                shadowOpacity: 0.6,
-                shadowRadius: 14,
-                shadowOffset: { width: 0, height: 0 },
-                elevation: 10,
-              }
-            : null),
-        },
-      ]}
-    >
+    <View style={[styles.alertFooter, { borderTopColor: C.redAccent, borderTopWidth: 1 }]}>
       {children}
-    </Pressable>
+    </View>
   );
 
   if (sensors.length === 0) {
     return wrap(
-      <View style={[styles.center, { height: 80 }]}>
-        <Text style={{ color: FIRE_TEXT2, fontSize: 14 }}>
+      <View style={[styles.center, { height: 48 }]}>
+        <Text style={{ color: FIRE_TEXT2, fontSize: 12 }}>
           Fire device information unavailable
         </Text>
       </View>,
@@ -755,188 +924,27 @@ function AlertFooter(props: {
   const idx = Math.max(0, foundIndex);
   const cur = sensors[idx];
 
-  const totalAlerts = counts.reduce((a, b) => a + b, 0);
-  const otherFloorAlerts = totalAlerts - sensors.length;
-
-  const detail = (
-    label: string,
-    value: string,
-    flex: number,
-  ) => (
+  const detail = (label: string, value: string, flex: number) => (
     <View style={[styles.alertDetail, { flex }]}>
-      <Text style={{ color: FIRE_TEXT2, fontSize: 12 }}>
-        {label}
-      </Text>
-
-      <Text
-        numberOfLines={2}
-        style={{
-          color: FIRE_TEXT,
-          fontSize: 14,
-          fontWeight: '600',
-          marginTop: 3,
-        }}
-      >
+      <Text style={{ color: FIRE_TEXT2, fontSize: 10 }}>{label}</Text>
+      <Text numberOfLines={2} style={{ color: FIRE_TEXT, fontSize: 12, fontWeight: '600', marginTop: 1 }}>
         {value === '' ? '-' : value}
       </Text>
     </View>
   );
 
-  const nav = (icon: string, onPress: () => void) => (
-    <Pressable
-      focusable={false}
-      disabled={totalAlerts < 2}
-      onPress={onPress}
-      style={{ paddingHorizontal: 4 }}
-    >
-      <Icon
-        name={icon}
-        size={34}
-        color={
-          totalAlerts > 1
-            ? C.white
-            : 'rgba(255,255,255,0.24)'
-        }
-      />
-    </Pressable>
-  );
-
   return wrap(
     <>
-      {floors.length > 1 && (
-        <View style={styles.chipRow}>
-          <Text
-            style={{
-              color: C.redAccent,
-              fontSize: 13,
-              fontWeight: 'bold',
-              marginRight: 8,
-            }}
-          >
-            FIRE ON:
-          </Text>
-
-          {floors.map((f, i) => (
-            <Pressable
-              key={f.id}
-              focusable={false}
-              onPress={() => props.onPickFloor(i)}
-              style={[
-                styles.chip,
-                {
-                  backgroundColor:
-                    i === floorIdx
-                      ? C.redAccent
-                      : 'rgba(244,67,54,0.15)',
-                },
-              ]}
-            >
-              <Text
-                style={{
-                  color:
-                    i === floorIdx ? C.white : FIRE_TEXT,
-                  fontSize: 13,
-                  fontWeight: '600',
-                }}
-              >
-                {`${f.floorLabel} · ${counts[i]}`}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
-      )}
-
-      <View
-        style={{
-          flexDirection: 'row',
-          alignItems: 'center',
-        }}
-      >
-        {nav('chevron-left', () => props.onGlobal(-1))}
-
-        <Icon
-          name="local-fire-department"
-          size={30}
-          color={C.redAccent}
-        />
-
-        <View style={{ width: 6 }} />
-
-        {detail('Device', cur.name, 3)}
+      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+        <Icon name="local-fire-department" size={22} color={C.redAccent} />
+        <View style={{ width: 4 }} />
+        {detail('Device', props.isOffline?.(cur) ? `${cur.name} (OFFLINE)` : cur.name, 3)}
         {detail('Sensor', cur.zoneLabel, 2)}
         {detail('Location', cur.location, 3)}
-        {detail(
-          'Time',
-          formatElapsed(startTimes.get(pinKey(cur)), now),
-          1,
-        )}
-
-        {cur.notes.trim() !== '' &&
-          detail('Notes', cur.notes, 3)}
-
-        {nav('chevron-right', () => props.onGlobal(1))}
+        {detail('Time', formatElapsed(startTimes.get(pinKey(cur)), now), 1)}
+        {cur.notes.trim() !== '' && detail('Notes', cur.notes, 3)}
       </View>
 
-      <View style={styles.footerInfo}>
-        <Text
-          style={{
-            color: C.redAccent,
-            fontSize: 14,
-            fontWeight: 'bold',
-          }}
-        >
-          {`${floor.floorLabel}  •  Floor ${
-            floorIdx + 1
-          } of ${floors.length}  •  Alert ${
-            idx + 1
-          } of ${sensors.length}`}
-        </Text>
-
-        <View style={styles.dots}>
-          {sensors.map((s, i) => (
-            <Pressable
-              key={pinKey(s)}
-              focusable={false}
-              onPress={() => props.onPickSensor(i)}
-              style={[
-                styles.dot,
-                {
-                  width: i === idx ? 22 : 9,
-                  backgroundColor:
-                    i === idx
-                      ? C.redAccent
-                      : 'rgba(255,255,255,0.24)',
-                },
-              ]}
-            />
-          ))}
-        </View>
-
-        {totalAlerts > 1 && (
-          <Text
-            style={{
-              color: FIRE_TEXT2,
-              fontSize: 13,
-              marginLeft: 12,
-            }}
-          >
-            Left / Right: browse alerts    Down / OK: next floor
-            {'    '}CH+ / CH-: floors
-          </Text>
-        )}
-
-        {otherFloorAlerts > 0 && (
-          <Text
-            style={{
-              color: '#FFAB40',
-              fontSize: 13,
-              marginLeft: 12,
-            }}
-          >
-            {`+${otherFloorAlerts} on other floors`}
-          </Text>
-        )}
-      </View>
     </>,
   );
 }
@@ -946,8 +954,8 @@ function EmptyState() {
   return (
     <View style={styles.center}>
       <Icon name="image" size={64} color={C.grey} />
-      <Text style={{ color: C.grey, fontSize: 16, marginTop: 12 }}>No floor plan configured yet</Text>
-      <Text style={{ color: C.grey, fontSize: 14, marginTop: 4 }}>Load one from the Configuration screen</Text>
+      <Text style={{ color: C.grey, fontSize: 14, marginTop: 12 }}>No floor plan configured yet</Text>
+      <Text style={{ color: C.grey, fontSize: 12, marginTop: 4 }}>Load one from the Configuration screen</Text>
     </View>
   );
 }
@@ -957,28 +965,30 @@ const styles = StyleSheet.create({
   topBar: { height: 56, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', borderBottomWidth: 1 },
   logo: { width: 80, height: 56 },
   topCenter: { position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, alignItems: 'center', justifyContent: 'center' },
-  clock: { width: 90, textAlign: 'right', fontSize: 14, lineHeight: 17, fontWeight: '600', marginRight: 10 },
+  clock: { width: 90, textAlign: 'right', fontSize: 12, lineHeight: 15, fontWeight: '600', marginRight: 10 },
   conn: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 6, borderWidth: 1, marginRight: 8 },
-  iconBtn: { padding: 8, marginLeft: 4 },
+  iconBtn: { padding: 5, marginLeft: 2 },
   floorCanvas: { flex: 1, borderRadius: 8, overflow: 'hidden' },
   floorTabs: { flex: 1, borderRightWidth: 1, borderBottomWidth: 1 },
-  floorHeader: { height: 42, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12 },
-  floorTab: { height: 40, paddingHorizontal: 10, marginHorizontal: 6, marginVertical: 1, flexDirection: 'row', alignItems: 'center' },
+  floorHeader: { height: 34, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12 },
+  floorTab: { minHeight: 34, paddingVertical: 4, paddingHorizontal: 8, marginHorizontal: 6, marginVertical: 1, flexDirection: 'row', alignItems: 'center' },
   selBar: { width: 3, height: 18, borderRadius: 2, marginRight: 8 },
-  deviceRow: { paddingHorizontal: 8, paddingVertical: 5, marginHorizontal: 6, marginVertical: 1, flexDirection: 'row', alignItems: 'center' },
+  deviceRow: { paddingHorizontal: 6, paddingVertical: 4, marginHorizontal: 6, marginVertical: 1, flexDirection: 'row', alignItems: 'center' },
   left: { width: PANEL_WIDTH },
   right: { width: RIGHT_PANEL_WIDTH, flexGrow: 0, flexShrink: 0 },
   hr: { height: 1 },
-  bottom: { height: 48, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', borderTopWidth: 1 },
-  fireList: { width: 190, backgroundColor: FIRE_BG },
-  fireItem: { height: 44, paddingHorizontal: 10, marginHorizontal: 6, marginVertical: 1, flexDirection: 'row', alignItems: 'center' },
+  bottom: { height: 40, paddingHorizontal: 16, flexDirection: 'row', alignItems: 'center', borderTopWidth: 1 },
+  fireList: { width: 150, backgroundColor: FIRE_BG },
+  alertPanel: { width: 150, flexGrow: 0, flexShrink: 0, backgroundColor: FIRE_BG, borderLeftWidth: 1, borderLeftColor: 'rgba(244,67,54,0.35)' },
+  alertPanelHeader: { height: 44, flexDirection: 'row', alignItems: 'center', paddingHorizontal: 10, borderBottomWidth: 1, borderBottomColor: 'rgba(244,67,54,0.35)' },
+  sensorCard: { paddingHorizontal: 8, paddingVertical: 6, marginBottom: 2, flexDirection: 'row', alignItems: 'center' },
+  fireItem: { minHeight: 40, paddingVertical: 4, paddingHorizontal: 8, marginHorizontal: 6, marginVertical: 1, flexDirection: 'row', alignItems: 'center' },
   alertHeader: { height: 44, paddingHorizontal: 16, justifyContent: 'center', borderBottomWidth: 1, borderBottomColor: C.redAccent },
-  alertFooter: { paddingHorizontal: 8, paddingVertical: 8, backgroundColor: FIRE_BG },
-  chipRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginBottom: 6 },
-  chip: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12, borderWidth: 1, borderColor: C.redAccent, marginRight: 8, marginBottom: 4 },
+  alertFooter: { paddingHorizontal: 6, paddingVertical: 4, backgroundColor: FIRE_BG },
+  chipRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', marginBottom: 2 },
+  chip: { paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, borderWidth: 1, borderColor: C.redAccent, marginRight: 6, marginBottom: 2 },
   footerInfo: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', flexWrap: 'wrap', marginTop: 6 },
   dots: { flexDirection: 'row', alignItems: 'center', marginLeft: 12 },
   dot: { height: 9, borderRadius: 5, marginHorizontal: 2 },
-  countBadge: { backgroundColor: C.redAccent, borderRadius: 10, paddingHorizontal: 7, paddingVertical: 2, marginLeft: 6 },
-  alertDetail: { flex: 1, paddingHorizontal: 8, justifyContent: 'center' },
+  alertDetail: { flex: 1, paddingHorizontal: 6, justifyContent: 'center' },
 });

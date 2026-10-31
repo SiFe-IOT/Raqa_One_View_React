@@ -9,8 +9,13 @@ export type PinLiveStatus = 'healthy' | 'fault' | 'fire' | 'recovered' | 'disabl
 
 export const pinKey = (s: PlacedSensor) => `${s.slaveId}_${s.zoneAddress}`;
 
-export function statusFor(manager: Rs485Service, sensor: PlacedSensor): PinLiveStatus {
-  if (manager.isSlaveOffline(sensor.slaveId)) return 'offline';
+/**
+ * `latched` = pins that were in FIRE when their device dropped off the bus.
+ * Such a pin stays 'fire' while offline (a burnt-out / dead device must not
+ * silence the alarm); it clears once the device is back and reports no fire.
+ */
+export function statusFor(manager: Rs485Service, sensor: PlacedSensor, latched?: ReadonlySet<string>): PinLiveStatus {
+  if (manager.isSlaveOffline(sensor.slaveId)) return latched?.has(pinKey(sensor)) ? 'fire' : 'offline';
 
   const index = sensor.slaveId - 1;
   if (index < 0 || index >= manager.slaveRegistersNotifier.length) return 'unknown';
@@ -51,23 +56,24 @@ export const priorityRank = (s: PlacedSensor) => ModbusRtu.priorityForSlave(s.sl
 export function bestPrioritySensorForFloor(
   manager: Rs485Service,
   floor: SiteImageConfig,
+  latched?: ReadonlySet<string>,
 ): PlacedSensor | null {
   let best: PlacedSensor | null = null;
   for (const s of floor.sensors) {
-    if (statusFor(manager, s) !== 'fire') continue;
+    if (statusFor(manager, s, latched) !== 'fire') continue;
     if (!best || priorityRank(s) < priorityRank(best)) best = s;
   }
   return best;
 }
 
 /** Floors with an active fire, highest-priority first; stable by original index. */
-export function fireFloors(manager: Rs485Service, history: SiteImageConfig[]): SiteImageConfig[] {
+export function fireFloors(manager: Rs485Service, history: SiteImageConfig[], latched?: ReadonlySet<string>): SiteImageConfig[] {
   const floors = history
     .map((f, i) => ({ f, i }))
-    .filter(({ f }) => f.sensors.some((s) => statusFor(manager, s) === 'fire'));
+    .filter(({ f }) => f.sensors.some((s) => statusFor(manager, s, latched) === 'fire'));
 
   const rankOf = (f: SiteImageConfig) => {
-    const b = bestPrioritySensorForFloor(manager, f);
+    const b = bestPrioritySensorForFloor(manager, f, latched);
     return b ? priorityRank(b) : 1 << 30;
   };
 
@@ -80,8 +86,9 @@ export function firingSensorsForFloor(
   manager: Rs485Service,
   floor: SiteImageConfig,
   startTimes: Map<string, number>,
+  latched?: ReadonlySet<string>,
 ): PlacedSensor[] {
-  const firing = floor.sensors.filter((s) => statusFor(manager, s) === 'fire');
+  const firing = floor.sensors.filter((s) => statusFor(manager, s, latched) === 'fire');
   firing.sort((a, b) => {
     const r = priorityRank(a) - priorityRank(b);
     if (r !== 0) return r;
